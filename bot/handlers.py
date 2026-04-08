@@ -1,19 +1,16 @@
 import logging
 import requests
 import io
-from telebot import TeleBot, types
-from telebot.types import InputFile
-from config import TELEGRAM_TOKEN, FASHN_API_KEY
-from bot.fashn import FashnClient
+import os
 import base64
 import hmac
 import hashlib
-import os
+from telebot import TeleBot, types
+from telebot.types import InputFile
+from config import TELEGRAM_TOKEN, FASHN_API_KEY, VIRTUAL_TRYON_SECRET
+from bot.fashn import FashnClient
 
 logger = logging.getLogger(__name__)
-
-# Секретный ключ для проверки токенов (должен совпадать с основным ботом)
-VIRTUAL_TRYON_SECRET = os.getenv('VIRTUAL_TRYON_SECRET', 'default-secret-change-me')
 
 def verify_tryon_token(token: str) -> str | None:
     """Проверяет токен и возвращает user_id, если токен верен"""
@@ -30,7 +27,7 @@ def verify_tryon_token(token: str) -> str | None:
 bot = TeleBot(TELEGRAM_TOKEN)
 fashn_client = FashnClient(FASHN_API_KEY)
 
-# Хранилище активных сессий: chat_id -> user_id
+# Хранилище активных сессий: chat_id -> словарь с данными
 active_sessions = {}
 
 @bot.message_handler(commands=['start'])
@@ -40,7 +37,7 @@ def start(message: types.Message):
         token = text.split(' ', 1)[1]
         user_id = verify_tryon_token(token)
         if user_id and user_id == str(message.from_user.id):
-            active_sessions[message.chat.id] = user_id
+            active_sessions[message.chat.id] = {'user_id': user_id}
             bot.send_message(message.chat.id, 
                 "✅ Доступ разрешён. Пришлите, пожалуйста, фото человека (модели) в полный рост.")
             return
@@ -55,18 +52,18 @@ def handle_photo(message: types.Message):
         bot.send_message(chat_id, "Доступ не разрешён. Используйте команду /start с правильной ссылкой.")
         return
     
-    # Определяем, какое фото по счёту (первое или второе)
-    if 'model_photo_id' not in active_sessions[chat_id]:
+    session = active_sessions[chat_id]
+    if 'model_bytes' not in session:
         # Это первое фото — модель
         photo = message.photo[-1]
         file_id = photo.file_id
         file_info = bot.get_file(file_id)
         file_bytes = bot.download_file(file_info.file_path)
-        active_sessions[chat_id] = {'model_bytes': file_bytes}
+        session['model_bytes'] = file_bytes
         bot.send_message(chat_id, "Отлично! Теперь пришлите фото одежды, которую хотите примерить.")
     else:
         # Это второе фото — одежда
-        model_bytes = active_sessions[chat_id]['model_bytes']
+        model_bytes = session['model_bytes']
         photo = message.photo[-1]
         file_id = photo.file_id
         file_info = bot.get_file(file_id)
@@ -74,10 +71,8 @@ def handle_photo(message: types.Message):
         
         bot.send_message(chat_id, "⏳ Генерирую виртуальную примерку... Это может занять до минуты.")
         try:
-            # Отправляем запрос в FASHN API
             prediction_id = fashn_client.run(model_bytes, garment_bytes)
             result_url = fashn_client.poll(prediction_id)
-            # Скачиваем результат
             resp = requests.get(result_url)
             if resp.status_code == 200:
                 bot.send_photo(chat_id, InputFile(io.BytesIO(resp.content), filename="result.jpg"),
@@ -89,8 +84,6 @@ def handle_photo(message: types.Message):
             bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}")
         finally:
             # Удаляем сессию, чтобы можно было начать заново (или оставить для следующей одежды)
-            # По желанию: можно не удалять, а позволить примерять несколько вещей на ту же модель
-            # Но для простоты удалим, чтобы пользователь мог начать с новой модели
             del active_sessions[chat_id]
 
 @bot.message_handler(func=lambda message: True)
