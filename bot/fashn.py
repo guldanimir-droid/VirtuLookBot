@@ -22,51 +22,57 @@ class FashnClient:
             "Content-Type": "application/json"
         }
 
-    def run(self, model_bytes: bytes, garment_bytes: bytes, category="auto") -> str:
-        body = {
-            "model_image":   _b64(model_bytes),
-            "garment_image": _b64(garment_bytes),
-            "category":      category,
-            "mode":          "balanced",
-            "output_format": "jpeg",
+    def run(self, model_bytes: bytes, garment_bytes: bytes) -> str:
+        # Формируем тело запроса в соответствии с документацией
+        payload = {
+            "model_name": "tryon-v1.6",
+            "inputs": {
+                "model_image": _b64(model_bytes),
+                "garment_image": _b64(garment_bytes),
+                "category": "auto",
+                "segmentation_free": True,
+                "moderation_level": "permissive",
+                "garment_photo_type": "auto"
+            }
         }
-        logger.info(f"Sending to FASHN API: category={category}, model_image size={len(body['model_image'])}, garment_image size={len(body['garment_image'])}")
+        logger.info("Sending request to FASHN API...")
+        response = requests.post(f"{BASE_URL}/run", json=payload, headers=self.headers)
         
-        try:
-            r = requests.post(f"{BASE_URL}/run", json=body, headers=self.headers, timeout=30)
-            logger.info(f"FASHN response status: {r.status_code}")
-            if r.status_code != 200:
-                logger.error(f"FASHN error response body: {r.text}")
-            r.raise_for_status()
-            data = r.json()
-            logger.info(f"FASHN run successful, prediction_id={data['id']}")
-            return data["id"]
-        except requests.exceptions.RequestException as e:
-            logger.exception("FASHN API request failed")
-            raise
+        if response.status_code != 200:
+            logger.error(f"FASHN API error: {response.status_code} - {response.text}")
+            response.raise_for_status()
+        
+        data = response.json()
+        prediction_id = data.get("id")
+        if not prediction_id:
+            raise RuntimeError("No prediction ID in response")
+        logger.info(f"Prediction started, ID: {prediction_id}")
+        return prediction_id
 
     def poll(self, pred_id: str, timeout=60) -> str:
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            try:
-                r = requests.get(f"{BASE_URL}/status/{pred_id}", headers=self.headers, timeout=15)
-                if r.status_code != 200:
-                    logger.error(f"FASHN status error {r.status_code}: {r.text}")
-                    r.raise_for_status()
-                data = r.json()
-                status = data.get("status")
-                logger.info(f"Polling {pred_id}: status={status}")
-                if status == "completed":
-                    output = data.get("output")
-                    if output and isinstance(output, list) and len(output) > 0:
-                        return output[0]
-                    else:
-                        raise RuntimeError("FASHN completed but no output")
-                elif status == "failed":
-                    error_msg = data.get("error", "Unknown error")
-                    raise RuntimeError(f"FASHN failed: {error_msg}")
-                time.sleep(3)
-            except requests.exceptions.RequestException as e:
-                logger.exception("FASHN polling error")
-                raise
-        raise TimeoutError("FASHN timed out")
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            status_response = requests.get(f"{BASE_URL}/status/{pred_id}", headers=self.headers)
+            if status_response.status_code != 200:
+                logger.error(f"Status check failed: {status_response.status_code}")
+                status_response.raise_for_status()
+            
+            status_data = status_response.json()
+            current_status = status_data.get("status")
+            logger.info(f"Polling status: {current_status}")
+            
+            if current_status == "completed":
+                output = status_data.get("output")
+                if output and isinstance(output, list) and len(output) > 0:
+                    result_url = output[0]
+                    logger.info(f"Generation completed, result URL: {result_url}")
+                    return result_url
+                else:
+                    raise RuntimeError("FASHN completed but no output found")
+            elif current_status == "failed":
+                error_msg = status_data.get("error", "Unknown error")
+                raise RuntimeError(f"FASHN generation failed: {error_msg}")
+            
+            time.sleep(3)
+        
+        raise TimeoutError("FASHN API timed out")
