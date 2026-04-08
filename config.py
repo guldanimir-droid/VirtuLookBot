@@ -1,11 +1,13 @@
-# --- секреты ---
-TELEGRAM_TOKEN = '8602871973:AAHJQ048-nTZcFxAeWFtX2d5zqJ_eHGcH9U'
-FASHN_API_KEY  = 'fa-ie2irJofsoGJ-4Fr9itDyZsrar7hzZ51QhOQm'
+import os
+
+# --- секреты (берутся из переменных окружения) ---
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '')
+FASHN_API_KEY  = os.getenv('FASHN_API_KEY', '')
+WEBHOOK_URL_BASE = os.getenv('WEBHOOK_URL_BASE', '')
 
 # --- сеть ---
-# На тесте (ngrok) подменяйте это на https://<твой-.ngrok.app>
-WEBHOOK_URL_BASE = '----------------------------------------p'   # ← поменяйте в продакшне
-WEBHOOK_URL_PATH = f"/bot/{TELEGRAM_TOKEN}"
+# Для локального теста можно использовать ngrok, в продакшене Railway сам задаст WEBHOOK_URL_BASE
+WEBHOOK_URL_PATH = f"/bot/{TELEGRAM_TOKEN}" if TELEGRAM_TOKEN else "/bot/"
 
-# Локальный порт, который будете пробрасывать через ngrok
-PORT = 8080
+# Порт для локального запуска (на Railway используется порт из переменной PORT)
+PORT = int(os.getenv('PORT', 8080))
