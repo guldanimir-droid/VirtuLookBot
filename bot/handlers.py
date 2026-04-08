@@ -1,86 +1,98 @@
-import telebot, requests
-from config import TELEGRAM_TOKEN
-from .state import Step
-from .fashn import FashnClient
-import re
-from urllib.parse import urlparse
+import logging
+import requests
+import io
+from telebot import TeleBot, types
+from telebot.types import InputFile
+from config import TELEGRAM_TOKEN, FASHN_API_KEY
+from bot.fashn import FashnClient
+import base64
+import hmac
+import hashlib
+import os
 
-URL_RE = re.compile(r'https?://\S+')
+logger = logging.getLogger(__name__)
 
-bot   = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
-fashn = FashnClient()
+# Секретный ключ для проверки токенов (должен совпадать с основным ботом)
+VIRTUAL_TRYON_SECRET = os.getenv('VIRTUAL_TRYON_SECRET', 'default-secret-change-me')
 
-# упрощённое хранилище сессии: {chat_id: {step, model}}
-user_state: dict[int, dict] = {}
+def verify_tryon_token(token: str) -> str | None:
+    """Проверяет токен и возвращает user_id, если токен верен"""
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        user_id, signature = decoded.rsplit(':', 1)
+        expected = hmac.new(VIRTUAL_TRYON_SECRET.encode(), user_id.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(signature, expected):
+            return user_id
+    except Exception:
+        pass
+    return None
 
-@bot.message_handler(func=lambda m: m.text and URL_RE.match(m.text))
-def handle_garment_url(m):
-    cid = m.chat.id
-    st = user_state.setdefault(cid, {"step": Step.WAITING_MODEL})
-    if st["step"] is not Step.WAITING_GARMENT:
+bot = TeleBot(TELEGRAM_TOKEN)
+fashn_client = FashnClient(FASHN_API_KEY)
+
+# Хранилище активных сессий: chat_id -> user_id
+active_sessions = {}
+
+@bot.message_handler(commands=['start'])
+def start(message: types.Message):
+    text = message.text
+    if ' ' in text:
+        token = text.split(' ', 1)[1]
+        user_id = verify_tryon_token(token)
+        if user_id and user_id == str(message.from_user.id):
+            active_sessions[message.chat.id] = user_id
+            bot.send_message(message.chat.id, 
+                "✅ Доступ разрешён. Пришлите, пожалуйста, фото человека (модели) в полный рост.")
+            return
+    # Если токен неверный или отсутствует
+    bot.send_message(message.chat.id, 
+        "🚫 Этот бот работает только через @stil_snap_ai_bot. Пожалуйста, начните с основного бота.")
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message: types.Message):
+    chat_id = message.chat.id
+    if chat_id not in active_sessions:
+        bot.send_message(chat_id, "Доступ не разрешён. Используйте команду /start с правильной ссылкой.")
         return
-    link = m.text.strip()
-    try:
-        resp = requests.get(link, timeout=10)
-        resp.raise_for_status()
-        garment_bytes = resp.content
-    except Exception as e:
-        return bot.send_message(cid, f"Не смог загрузить изображение по ссылке: {e}")
-    bot.send_message(cid, "⏳ Генерирую…")
-    st["step"] = Step.PROCESSING
-    try:
-        pred_id = fashn.run(st.pop("model"), garment_bytes)
-        out_url = fashn.poll(pred_id)
-        bot.send_photo(cid, out_url, caption="Готово! ✨")
-    except Exception as e:
-        bot.send_message(cid, f"⚠️ Ошибка: {e}")
-    finally:
-        st["step"] = Step.WAITING_MODEL
-        bot.send_message(cid, "Хотите ещё примерить? Пришлите новое фото модели.")
-
-def _dl(file_id: str) -> bytes:
-    file_info = bot.get_file(file_id)
-    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
-    return requests.get(url).content
-
-@bot.message_handler(commands=["start"])
-def start(m):
-    user_state[m.chat.id] = {"step": Step.WAITING_MODEL}
-    bot.send_message(m.chat.id, "👋 Привет! Пришли фото в полный рост.")
-
-@bot.message_handler(content_types=["photo"])
-def got_photo(m):
-    cid = m.chat.id
-    st  = user_state.setdefault(cid, {"step": Step.WAITING_MODEL})
-    img = _dl(m.photo[-1].file_id)
-
-    if st["step"] is Step.WAITING_MODEL:
-        st["model"] = img
-        st["step"]  = Step.WAITING_GARMENT
-        bot.send_message(m.chat.id, "Отлично! Теперь фото одежды для примерки.")
-
-    elif st["step"] is Step.WAITING_GARMENT:
-        bot.send_message(m.chat.id, "⏳ Генерирую…")
-        st["step"] = Step.PROCESSING
+    
+    # Определяем, какое фото по счёту (первое или второе)
+    if 'model_photo_id' not in active_sessions[chat_id]:
+        # Это первое фото — модель
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_info = bot.get_file(file_id)
+        file_bytes = bot.download_file(file_info.file_path)
+        active_sessions[chat_id] = {'model_bytes': file_bytes}
+        bot.send_message(chat_id, "Отлично! Теперь пришлите фото одежды, которую хотите примерить.")
+    else:
+        # Это второе фото — одежда
+        model_bytes = active_sessions[chat_id]['model_bytes']
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_info = bot.get_file(file_id)
+        garment_bytes = bot.download_file(file_info.file_path)
+        
+        bot.send_message(chat_id, "⏳ Генерирую виртуальную примерку... Это может занять до минуты.")
         try:
-            pid = fashn.run(st.pop("model"), img)
-            result_url = fashn.poll(pid)
-            bot.send_photo(cid, result_url, caption="Готово! ✨")
+            # Отправляем запрос в FASHN API
+            prediction_id = fashn_client.run(model_bytes, garment_bytes)
+            result_url = fashn_client.poll(prediction_id)
+            # Скачиваем результат
+            resp = requests.get(result_url)
+            if resp.status_code == 200:
+                bot.send_photo(chat_id, InputFile(io.BytesIO(resp.content), filename="result.jpg"),
+                    caption="✅ Примерка готова! Хотите ещё? Пришлите новое фото одежды или начните заново через основного бота.")
+            else:
+                bot.send_message(chat_id, "❌ Не удалось получить изображение результата.")
         except Exception as e:
-            bot.send_message(cid, f"⚠️ Ошибка: {e}")
+            logger.exception("Ошибка при генерации примерки")
+            bot.send_message(chat_id, f"⚠️ Ошибка: {str(e)}")
         finally:
-            st["step"] = Step.WAITING_MODEL
-            bot.send_message(cid, "Хотите ещё примерку? Пришлите новое фото модели.")
+            # Удаляем сессию, чтобы можно было начать заново (или оставить для следующей одежды)
+            # По желанию: можно не удалять, а позволить примерять несколько вещей на ту же модель
+            # Но для простоты удалим, чтобы пользователь мог начать с новой модели
+            del active_sessions[chat_id]
 
-    else:  # PROCESSING
-        bot.send_message(m.chat.id, "⏳ Один момент, предыдущее изображение ещё обрабатывается…")
-
-@bot.message_handler(func=lambda _: True)
-def fallback(m):
-    st = user_state.get(m.chat.id, {}).get("step", Step.WAITING_MODEL)
-    msg = {
-        Step.WAITING_MODEL:   "Пожалуйста, пришлите фото в полный рост 🙂",
-        Step.WAITING_GARMENT: "Жду фото одежды для примерки.",
-        Step.PROCESSING:      "Генерирую предыдущее изображение, подождите…",
-    }[st]
-    bot.send_message(m.chat.id, msg)
+@bot.message_handler(func=lambda message: True)
+def echo(message: types.Message):
+    bot.send_message(message.chat.id, "Пожалуйста, отправьте фото.")
