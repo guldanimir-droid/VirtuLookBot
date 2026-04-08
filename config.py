@@ -1,6 +1,6 @@
 # --- секреты ---
-TELEGRAM_TOKEN = '------------------------------------------'
-FASHN_API_KEY  = '-------------------------------------------'
+TELEGRAM_TOKEN = '8602871973:AAHJQ048-nTZcFxAeWFtX2d5zqJ_eHGcH9U'
+FASHN_API_KEY  = 'fa-ie2irJofsoGJ-4Fr9itDyZsrar7hzZ51QhOQm'
 
 # --- сеть ---
 # На тесте (ngrok) подменяйте это на https://<твой-.ngrok.app>
